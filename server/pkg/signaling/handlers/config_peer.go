@@ -238,6 +238,19 @@ func CONFIG_PEER(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		nil,
 	)
 
+	// Tell the peer to expect a connection from the host
+	message.Code(
+		client,
+		"ANTICIPATE",
+		&structs.NewPeerParams{
+			ID:        host.ID,
+			User:      host.Username,
+			PublicKey: host.PublicKey,
+		},
+		"",
+		nil,
+	)
+
 	// Notify the new peer about other peers in the lobby using the DISCOVER opcode.
 	// This tells the new peer to make connections with existing peers.
 	existing := manager.GetLobbyPeers(s, params.Payload.LobbyID, client.UGI)
