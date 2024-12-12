@@ -17,6 +17,7 @@ type Client struct {
 	Lobby         string         // lobby id
 	Mux           *sync.RWMutex  // To prevent concurrent writes to the websocket connection
 	Metadata      map[string]any // arbitrary metadata that the client can specify
+	PublicKey     string
 }
 
 func (c *Client) ClearMode() {

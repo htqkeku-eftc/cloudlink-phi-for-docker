@@ -58,14 +58,14 @@ type NewHostParams struct {
 	ID        string `json:"id"`
 	User      string `json:"user"`
 	LobbyID   string `json:"lobby_id"`
-	PublicKey string `json:"pubkey,omitempty"`
+	PublicKey string `json:"pubkey,omitempty,omitnil"`
 }
 
 // Declare the packet format for the NEW_PEER signaling event.
 type NewPeerParams struct {
 	ID        string `json:"id"`
 	User      string `json:"user"`
-	PublicKey string `json:"pubkey,omitempty"`
+	PublicKey string `json:"pubkey,omitempty,omitnil"`
 }
 
 type RootError struct {

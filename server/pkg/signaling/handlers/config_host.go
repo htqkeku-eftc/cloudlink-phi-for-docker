@@ -116,6 +116,9 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 	// Set the client to the current lobby
 	client.SetLobby(config.Payload.LobbyID)
 
+	// Store the client public key (if specified)
+	client.PublicKey = config.Payload.PublicKey
+
 	// Notify other clients (that haven't joined a lobby) about the new host
 	message.Broadcast(
 		manager.WithoutPeer(
@@ -128,7 +131,7 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 				ID:        client.ID,
 				User:      client.Username,
 				LobbyID:   config.Payload.LobbyID,
-				PublicKey: config.Payload.PublicKey,
+				PublicKey: client.PublicKey,
 			},
 		},
 	)
@@ -149,7 +152,7 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		message.Code(
 			client,
 			"ANTICIPATE",
-			&structs.PeerInfo{
+			&structs.NewPeerParams{
 				ID:   "relay",
 				User: "relay",
 			},
@@ -176,7 +179,7 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		message.Code(
 			client,
 			"DISCOVER",
-			&structs.PeerInfo{
+			&structs.NewPeerParams{
 				ID:   "relay",
 				User: "relay",
 			},
