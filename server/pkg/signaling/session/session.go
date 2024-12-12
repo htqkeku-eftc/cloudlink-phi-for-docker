@@ -171,8 +171,8 @@ func Close(s *structs.Server, client *structs.Client) {
 							&structs.SignalPacket{
 								Opcode: "HOST_RECLAIM",
 								Payload: &structs.PeerInfo{
-									ID:   client.ID,
-									User: client.Username},
+									ID:   peers[0].ID,
+									User: peers[0].Username},
 							},
 						)
 					}
