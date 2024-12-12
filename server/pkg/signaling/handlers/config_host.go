@@ -125,7 +125,7 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		&structs.SignalPacket{
 			Opcode: "NEW_HOST",
 			Payload: &structs.NewHostParams{
-				ID:        client.UGI,
+				ID:        client.ID,
 				User:      client.Username,
 				LobbyID:   config.Payload.LobbyID,
 				PublicKey: config.Payload.PublicKey,
