@@ -230,7 +230,7 @@ func protocolhandler(r *structs.Relay, channel string, rawpacket string) {
 		return
 	}
 
-	// TODO: Handle the opcode
+	// Handle the opcode
 	switch packet.Opcode {
 
 	case "G_MSG":
