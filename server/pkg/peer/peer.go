@@ -334,5 +334,13 @@ func protocolhandler(r *structs.Relay, channel string, rawpacket string) {
 
 	default:
 		log.Printf("Got unknown opcode: %s", packet.Opcode)
+		Send(
+			manager.GetRelay(r.Server, r.Peer),
+			channel,
+			&structs.RelayPacket{
+				Opcode:  "WARN",
+				Payload: "Unknown opcode: " + packet.Opcode,
+			},
+		)
 	}
 }
