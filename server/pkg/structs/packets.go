@@ -44,13 +44,15 @@ type LobbySettings struct {
 
 // Declare the packet format for the CONFIG_PEER signaling command.
 type PeerConfigPacket struct {
-	Opcode  string `json:"opcode" validate:"required" label:"opcode"`
-	Payload struct {
-		LobbyID   string `json:"lobby_id" validate:"required" label:"lobby_id"`
-		Password  string `json:"password" validate:"omitempty,max=128" label:"password"`
-		PublicKey string `json:"pubkey,omitempty" validate:"omitempty,omitnil" label:"pubkey"`
-	} `json:"payload" validate:"required_with=LobbyID" label:"payload"`
-	Listener string `json:"listener,omitempty" validate:"omitempty,omitnil" label:"listener"` // For clients to listen to server replies
+	Opcode   string            `json:"opcode" validate:"required" label:"opcode"`
+	Payload  *PeerConfigParams `json:"payload" validate:"required_with=LobbyID" label:"payload"`
+	Listener string            `json:"listener,omitempty" validate:"omitempty,omitnil" label:"listener"` // For clients to listen to server replies
+}
+
+type PeerConfigParams struct {
+	LobbyID   string `json:"lobby_id" validate:"required" label:"lobby_id"`
+	Password  string `json:"password" validate:"omitempty,max=128" label:"password"`
+	PublicKey string `json:"pubkey,omitempty" validate:"omitempty,omitnil" label:"pubkey"`
 }
 
 // Declare the packet format for the NEW_HOST signaling event.

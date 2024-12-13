@@ -3,6 +3,7 @@ package handlers
 import (
 	"log"
 
+	"github.com/MikeDev101/cloudlink-phi/server/pkg/manager"
 	"github.com/MikeDev101/cloudlink-phi/server/pkg/signaling/message"
 	"github.com/MikeDev101/cloudlink-phi/server/pkg/structs"
 )
@@ -30,7 +31,6 @@ func INIT(s *structs.Server, client *structs.Client, packet *structs.SignalPacke
 	}
 
 	// Set username
-
 	client.Username = packet.Payload.(string)
 	client.StoreAuthorization("")
 
@@ -49,4 +49,30 @@ func INIT(s *structs.Server, client *structs.Client, packet *structs.SignalPacke
 	if err != nil {
 		log.Printf("Send response to INIT opcode error: %s", err.Error())
 	}
+
+	// Phi-specific code: Check if the default room exists. If it doesn't, create it and make the client the host. Otherwise, join it.
+	var exists = manager.DoesLobbyExist(s, "default", client.UGI)
+
+	log.Printf("Does the default lobby exist? %v", exists)
+
+	if exists {
+		JoinLobby(s, client, &structs.PeerConfigPacket{
+			Payload: &structs.PeerConfigParams{
+				LobbyID: "default",
+			},
+		}, "")
+
+	} else {
+		OpenLobby(s, client, &structs.HostConfigPacket{
+			Payload: &structs.LobbySettings{
+				LobbyID:             "default",
+				UseServerRelay:      true,
+				AllowHostReclaim:    true,
+				AllowPeersToReclaim: false,
+			},
+		}, "")
+	}
+
+	// Allow the client to change modes later
+	client.ClearMode()
 }

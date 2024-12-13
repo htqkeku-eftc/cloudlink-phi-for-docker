@@ -35,16 +35,16 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		return
 	}
 
-	// Don't start this handler if the client is a peer
+	// Prepare to transition to host mode
 	if client.AmIPeer() {
+		session.PrepareToChangeModesOrDisconnect(s, client)
 		message.Code(
 			client,
-			"WARNING",
-			"Cannot change modes while in session. Please disconnect and reconnect.",
-			listener,
+			"TRANSITION",
+			"host",
+			"",
 			nil,
 		)
-		return
 	}
 
 	// Don't replay this handler if the client is already the host
@@ -87,6 +87,11 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		session.Close(s, client)
 		return
 	}
+
+	OpenLobby(s, client, config, listener)
+}
+
+func OpenLobby(s *structs.Server, client *structs.Client, config *structs.HostConfigPacket, listener string) {
 
 	// Create the lobby and add the client to it
 	if manager.DoesLobbyExist(s, config.Payload.LobbyID, client.UGI) {

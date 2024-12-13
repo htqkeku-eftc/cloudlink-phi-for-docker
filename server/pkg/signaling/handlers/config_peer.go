@@ -34,16 +34,16 @@ func CONFIG_PEER(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		return
 	}
 
-	// Don't start this handler if the client is a host
+	// Prepare to transition to peer mode
 	if client.AmIAHost() {
+		session.PrepareToChangeModesOrDisconnect(s, client)
 		message.Code(
 			client,
-			"WARNING",
-			"Cannot change modes while in session. Please disconnect and reconnect.",
-			listener,
+			"TRANSITION",
+			"peer",
+			"",
 			nil,
 		)
-		return
 	}
 
 	// Don't replay this handler if the client is already a peer
@@ -86,6 +86,11 @@ func CONFIG_PEER(s *structs.Server, client *structs.Client, rawpacket []byte, li
 		session.Close(s, client)
 		return
 	}
+
+	JoinLobby(s, client, params, listener)
+}
+
+func JoinLobby(s *structs.Server, client *structs.Client, params *structs.PeerConfigPacket, listener string) {
 
 	// Check if the requested lobby exists
 	if !manager.DoesLobbyExist(s, params.Payload.LobbyID, client.UGI) {
