@@ -114,21 +114,10 @@ func DestroyLobby(s *structs.Server, gameid string, lobbyid string) {
 		func() {
 			delete(s.Games.Games[gameid].Lobbies, lobbyid)
 		}()
-		if len(exclude_default(s.Games.Games[gameid].Lobbies)) == 0 {
+		if len(s.Games.Games[gameid].Lobbies) == 0 {
 			delete(s.Games.Games, gameid)
 		}
 	}()
-}
-
-// exclude_default takes a map of lobby ids to lobby structs and returns a new map without the entry for the "default" lobby.
-func exclude_default(lobbies map[string]*structs.Lobby) map[string]*structs.Lobby {
-	result := make(map[string]*structs.Lobby)
-	for k, v := range lobbies {
-		if k != "default" {
-			result[k] = v
-		}
-	}
-	return result
 }
 
 // SetLobbyHost sets the host of a lobby in a game on a server.
@@ -161,7 +150,6 @@ func RemoveLobbyHost(s *structs.Server, lobbyid string, gameid string, client *s
 	defer s.Games.Mutex.Unlock()
 	func() {
 		lobby := get_lobby(s, gameid, lobbyid)
-
 		lobby.Mutex.Lock()
 		defer lobby.Mutex.Unlock()
 		lobby.Host = nil
