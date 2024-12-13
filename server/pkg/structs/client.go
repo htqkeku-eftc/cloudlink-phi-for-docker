@@ -7,17 +7,20 @@ import (
 )
 
 type Client struct {
-	Conn          *websocket.Conn
-	Session       uint64
-	Username      string
-	ID            string
-	UGI           string
-	Mode          uint           // 0 - none, 1 - host, 2 - peer
-	Authorization any            // session token
-	Lobby         string         // lobby id
-	Mux           *sync.RWMutex  // To prevent concurrent writes to the websocket connection
-	Metadata      map[string]any // arbitrary metadata that the client can specify
-	PublicKey     string
+	Conn                      *websocket.Conn
+	Session                   uint64
+	Username                  string
+	ID                        string
+	UGI                       string
+	Mode                      uint   // 0 - none, 1 - host, 2 - peer
+	Authorization             any    // session token
+	Lobby                     string // lobby id
+	InLobby                   bool
+	Mux                       *sync.RWMutex  // To prevent concurrent writes to the websocket connection
+	Metadata                  map[string]any // arbitrary metadata that the client can specify
+	PublicKey                 string
+	TransitionDone            chan bool
+	InitialTransitionOverride bool
 }
 
 func (c *Client) ClearMode() {
@@ -53,9 +56,15 @@ func (c *Client) AmIAuthorized() bool {
 }
 
 func (c *Client) AmIInALobby() bool {
-	return c.Lobby != ""
+	return c.InLobby
 }
 
 func (c *Client) SetLobby(lobby string) {
 	c.Lobby = lobby
+	c.InLobby = true
+}
+
+func (c *Client) ClearLobby() {
+	c.Lobby = ""
+	c.InLobby = false
 }

@@ -36,7 +36,7 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 	}
 
 	// Prepare to transition to host mode
-	if client.AmIPeer() {
+	if client.InitialTransitionOverride || client.AmIPeer() {
 		session.PrepareToChangeModesOrDisconnect(s, client)
 		message.Code(
 			client,
@@ -45,6 +45,16 @@ func CONFIG_HOST(s *structs.Server, client *structs.Client, rawpacket []byte, li
 			"",
 			nil,
 		)
+
+		// Wait for the transition to finish before continuing
+		<-client.TransitionDone
+
+		// Set flag
+		if client.InitialTransitionOverride {
+			client.InitialTransitionOverride = false
+		}
+
+		client.ClearMode()
 	}
 
 	// Don't replay this handler if the client is already the host

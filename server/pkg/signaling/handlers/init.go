@@ -51,11 +51,7 @@ func INIT(s *structs.Server, client *structs.Client, packet *structs.SignalPacke
 	}
 
 	// Phi-specific code: Check if the default room exists. If it doesn't, create it and make the client the host. Otherwise, join it.
-	var exists = manager.DoesLobbyExist(s, "default", client.UGI)
-
-	log.Printf("Does the default lobby exist? %v", exists)
-
-	if exists {
+	if manager.DoesLobbyExist(s, "default", client.UGI) {
 		JoinLobby(s, client, &structs.PeerConfigPacket{
 			Payload: &structs.PeerConfigParams{
 				LobbyID: "default",
@@ -74,5 +70,5 @@ func INIT(s *structs.Server, client *structs.Client, packet *structs.SignalPacke
 	}
 
 	// Allow the client to change modes later
-	client.ClearMode()
+	client.InitialTransitionOverride = true
 }

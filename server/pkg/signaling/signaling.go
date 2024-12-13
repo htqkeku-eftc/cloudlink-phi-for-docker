@@ -124,76 +124,85 @@ func (srv *Server) Handler(conn *websocket.Conn) {
 			return
 		}
 
-		// Handle opcodes accordingly.
-		switch packet.Opcode {
+		// Allow for concurrent packet processing
+		go execute_packet(s, client, packet, rawpacket)
+	}
+}
 
-		// Keep connection alive
-		case "KEEPALIVE":
-			message.Code(
-				client,
-				"KEEPALIVE",
-				packet.Payload,
-				packet.Listener,
-				nil,
-			)
+func execute_packet(s *structs.Server, client *structs.Client, packet *structs.SignalPacket, rawpacket []byte) {
+	// Handle opcodes accordingly.
+	switch packet.Opcode {
 
-		// Initializes the session.
-		case "INIT":
-			handlers.INIT(s, client, packet)
+	// Keep connection alive
+	case "KEEPALIVE":
+		message.Code(
+			client,
+			"KEEPALIVE",
+			packet.Payload,
+			packet.Listener,
+			nil,
+		)
 
-		// Shares metadata about the client, and returns metadata about the server.
-		case "META":
-			handlers.META(s, client, packet)
+	// Initializes the session.
+	case "INIT":
+		handlers.INIT(s, client, packet)
 
-		// Makes the peer a lobby host.
-		case "CONFIG_HOST":
-			handlers.CONFIG_HOST(s, client, rawpacket, packet.Listener)
+	// Shares metadata about the client, and returns metadata about the server.
+	case "META":
+		handlers.META(s, client, packet)
 
-		// Makes the peer a lobby member.
-		case "CONFIG_PEER":
-			handlers.CONFIG_PEER(s, client, rawpacket, packet.Listener)
+	// Makes the peer a lobby host.
+	case "CONFIG_HOST":
+		handlers.CONFIG_HOST(s, client, rawpacket, packet.Listener)
 
-		// Relays SDP offer data.
-		case "MAKE_OFFER":
-			handlers.MAKE_OFFER(s, client, packet, rawpacket)
+	// Makes the peer a lobby member.
+	case "CONFIG_PEER":
+		handlers.CONFIG_PEER(s, client, rawpacket, packet.Listener)
 
-		// Relays SDP answer data.
-		case "MAKE_ANSWER":
-			handlers.MAKE_ANSWER(s, client, packet, rawpacket)
+	// Relays SDP offer data.
+	case "MAKE_OFFER":
+		handlers.MAKE_OFFER(s, client, packet, rawpacket)
 
-		// Relays SDP ICE data.
-		case "ICE":
-			handlers.ICE(s, client, packet, rawpacket)
+	// Relays SDP answer data.
+	case "MAKE_ANSWER":
+		handlers.MAKE_ANSWER(s, client, packet, rawpacket)
 
-		// Provides a list of all open lobbies to join.
-		case "LOBBY_LIST":
-			handlers.LOBBY_LIST(s, client, packet)
+	// Relays SDP ICE data.
+	case "ICE":
+		handlers.ICE(s, client, packet, rawpacket)
 
-		// Provides information about a lobby.
-		case "LOBBY_INFO":
-			handlers.LOBBY_INFO(s, client, packet)
+	// Provides a list of all open lobbies to join.
+	case "LOBBY_LIST":
+		handlers.LOBBY_LIST(s, client, packet)
 
-		// Prevents new peers from joining a lobby.
-		case "LOCK":
-			handlers.LOCK(s, client, packet)
+	// Provides information about a lobby.
+	case "LOBBY_INFO":
+		handlers.LOBBY_INFO(s, client, packet)
 
-		// Permits new peers to join a lobby.
-		case "UNLOCK":
-			handlers.UNLOCK(s, client, packet)
+	// Prevents new peers from joining a lobby.
+	case "LOCK":
+		handlers.LOCK(s, client, packet)
 
-		// Modifies the maximum number of peers allowed in a lobby.
-		case "SIZE":
-			handlers.SIZE(s, client, packet)
+	// Permits new peers to join a lobby.
+	case "UNLOCK":
+		handlers.UNLOCK(s, client, packet)
 
-		default:
-			message.Code(
-				client,
-				"VIOLATION",
-				"Unknown opcode",
-				packet.Listener,
-				nil,
-			)
-			return
-		}
+	// Modifies the maximum number of peers allowed in a lobby.
+	case "SIZE":
+		handlers.SIZE(s, client, packet)
+
+	case "TRANSITION_ACK":
+		log.Print("Transition ACK received")
+		client.TransitionDone <- true
+
+	default:
+		message.Code(
+			client,
+			"VIOLATION",
+			"Unknown opcode",
+			packet.Listener,
+			nil,
+		)
+		return
 	}
 }

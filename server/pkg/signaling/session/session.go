@@ -19,14 +19,15 @@ func Open(s *structs.Server, conn *websocket.Conn) *structs.Client {
 
 	// Create client
 	client := &structs.Client{
-		Conn:     conn,
-		ID:       ulid.Make().String(),
-		Username: "",
-		Session:  s.WebsocketConnCounter,
-		UGI:      "", // Stub from original server code that I don't feel like refactoring out
-		Mode:     0,
-		Mux:      &sync.RWMutex{},
-		Metadata: make(map[string]any),
+		Conn:           conn,
+		ID:             ulid.Make().String(),
+		Username:       "",
+		Session:        s.WebsocketConnCounter,
+		UGI:            "", // Stub from original server code that I don't feel like refactoring out
+		Mode:           0,
+		Mux:            &sync.RWMutex{},
+		Metadata:       make(map[string]any),
+		TransitionDone: make(chan bool),
 	}
 
 	// Increment counter
@@ -128,19 +129,15 @@ func PrepareToChangeModesOrDisconnect(s *structs.Server, client *structs.Client)
 
 	// Clear the current mode and disassociate from lobbies
 	client.ClearMode()
-	client.SetLobby("")
+	client.ClearLobby()
 }
 
 // leave_lobby removes a client from a lobby if they are not in a game (new clients are in the default lobby).
 // If the client is in a game, it removes them from their current lobby.
 // This function is only called when the client is leaving the lobby, either due to closing the session or changing modes.
 func leave_lobby(s *structs.Server, client *structs.Client) {
-	if client.AmINew() {
-		manager.RemoveClientFromLobby(s, "default", client.UGI, client)
-	} else {
-		if client.AmIInALobby() {
-			manager.RemoveClientFromLobby(s, client.Lobby, client.UGI, client)
-		}
+	if client.AmIInALobby() {
+		manager.RemoveClientFromLobby(s, client.Lobby, client.UGI, client)
 	}
 }
 
@@ -211,6 +208,7 @@ func LeaveLobbyWithPeerBasedReclaim(s *structs.Server, client *structs.Client, s
 // a HOST_RECLAIM message to inform all remaining peers of the new host. Finally,
 // it ensures the client is removed from the lobby.
 func LeaveLobbyWithAutomatedReclaim(s *structs.Server, client *structs.Client, settings *structs.LobbySettings) {
+
 	// First, remove the current host
 	manager.RemoveLobbyHost(s, client.Lobby, client.UGI, client)
 

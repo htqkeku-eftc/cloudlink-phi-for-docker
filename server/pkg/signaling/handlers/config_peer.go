@@ -35,7 +35,7 @@ func CONFIG_PEER(s *structs.Server, client *structs.Client, rawpacket []byte, li
 	}
 
 	// Prepare to transition to peer mode
-	if client.AmIAHost() {
+	if client.InitialTransitionOverride || client.AmIAHost() {
 		session.PrepareToChangeModesOrDisconnect(s, client)
 		message.Code(
 			client,
@@ -44,6 +44,16 @@ func CONFIG_PEER(s *structs.Server, client *structs.Client, rawpacket []byte, li
 			"",
 			nil,
 		)
+
+		// Wait for the transition to finish before continuing
+		<-client.TransitionDone
+
+		// Set flag
+		if client.InitialTransitionOverride {
+			client.InitialTransitionOverride = false
+		}
+
+		client.ClearMode()
 	}
 
 	// Don't replay this handler if the client is already a peer
@@ -181,9 +191,6 @@ func JoinLobby(s *structs.Server, client *structs.Client, params *structs.PeerCo
 		)
 		return
 	}
-
-	// Remove the client from the default lobby
-	manager.RemoveClientFromLobby(s, "default", client.UGI, client)
 
 	// Create the lobby and configure it
 	manager.AddClientToLobby(s, params.Payload.LobbyID, client.UGI, client)
