@@ -38,9 +38,6 @@ func Open(s *structs.Server, conn *websocket.Conn) *structs.Client {
 	// Add client entry to games
 	manager.AddClientToGame(s, "", client)
 
-	// Join default lobby
-	// manager.AddClientToLobby(s, "default", "", client)
-
 	log.Printf("Created new session for peer %s (websocket ID %d)", client.ID, client.Session)
 	return client
 }
@@ -78,6 +75,12 @@ func Close(s *structs.Server, client *structs.Client) {
 	log.Printf("Closed session for peer %s (websocket ID %d)", client.ID, client.Session)
 }
 
+// PrepareToChangeModesOrDisconnect handles a client leaving their current
+// lobby and/or disconnecting from the server. If the client is a peer, it
+// broadcasts a PEER_GONE message to other peers. If the client is a host, it
+// examines lobby settings for host reclaim options and manages the lobby
+// closure or host transfer process. Finally, it removes the client from the
+// lobby and game, and clears the client's mode and lobby.
 func PrepareToChangeModesOrDisconnect(s *structs.Server, client *structs.Client) {
 
 	// Check if peer
@@ -121,7 +124,6 @@ func PrepareToChangeModesOrDisconnect(s *structs.Server, client *structs.Client)
 				LeaveAndDestroyLobby(s, client, settings)
 			}
 		}
-
 	}
 
 	// Clear the current mode and disassociate from lobbies
@@ -129,6 +131,9 @@ func PrepareToChangeModesOrDisconnect(s *structs.Server, client *structs.Client)
 	client.SetLobby("")
 }
 
+// leave_lobby removes a client from a lobby if they are not in a game (new clients are in the default lobby).
+// If the client is in a game, it removes them from their current lobby.
+// This function is only called when the client is leaving the lobby, either due to closing the session or changing modes.
 func leave_lobby(s *structs.Server, client *structs.Client) {
 	if client.AmINew() {
 		manager.RemoveClientFromLobby(s, "default", client.UGI, client)
@@ -139,6 +144,12 @@ func leave_lobby(s *structs.Server, client *structs.Client) {
 	}
 }
 
+// LeaveLobbyWithPeerBasedReclaim handles the process of a host leaving a lobby when peer-based reclaim is enabled.
+// It first removes the current host from the lobby and checks the remaining peers. If no peers remain, it closes
+// the lobby and deletes any server-side relays if necessary. If one peer remains, it reassigns the host role to
+// that peer and informs them of the change. If multiple peers remain, it updates the lobby settings to indicate that
+// a host reclaim is in progress and broadcasts a "RECLAIM_HOST" opcode to all peers. Finally, it removes the client
+// from the lobby.
 func LeaveLobbyWithPeerBasedReclaim(s *structs.Server, client *structs.Client, settings *structs.LobbySettings) {
 	// First, remove the current host
 	manager.RemoveLobbyHost(s, client.Lobby, client.UGI, client)
@@ -192,6 +203,13 @@ func LeaveLobbyWithPeerBasedReclaim(s *structs.Server, client *structs.Client, s
 	leave_lobby(s, client)
 }
 
+// LeaveLobbyWithAutomatedReclaim handles the process of a client leaving a lobby
+// with automated host reclaim. It first removes the current host, then checks
+// for remaining peers in the lobby. If no peers remain, it checks if a server-side
+// relay is used and deletes it if necessary, then destroys the lobby. If peers
+// are present, it assigns the first peer in the list as the new host and broadcasts
+// a HOST_RECLAIM message to inform all remaining peers of the new host. Finally,
+// it ensures the client is removed from the lobby.
 func LeaveLobbyWithAutomatedReclaim(s *structs.Server, client *structs.Client, settings *structs.LobbySettings) {
 	// First, remove the current host
 	manager.RemoveLobbyHost(s, client.Lobby, client.UGI, client)
