@@ -151,7 +151,7 @@ func HandleAnswer(r *structs.Relay, answer *webrtc.SessionDescription) {
 func HandleIce(r *structs.Relay, ice *webrtc.ICECandidateInit) {
 	// Add the ICE candidate.
 	if err := r.Conn.AddICECandidate(*ice); err != nil {
-		panic(err)
+		log.Print(err)
 	}
 }
 
