@@ -1084,7 +1084,7 @@ SOFTWARE.
                     },
                     {
                         blockType: Scratch2.BlockType.LABEL,
-                        text: 'Unless you know what you're doing,',
+                        text: `Unless you know what you're doing,`,
                     },
                     {
                         blockType: Scratch2.BlockType.LABEL,
