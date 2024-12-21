@@ -21,6 +21,8 @@ Your browser needs to support the following features:
 * [Web Locks](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) - An internal dependency.
 * [Web Crypto](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) - Used for end-to-end encryption of user data (Default lobby will not be CL5-level encrypted).
 
+All modern browsers support these features out of the box. Unless you're using something old or obscure, it's probably best to update.
+
 ## Importing
 Download a copy of `index.js` from this repository and import the extension into your Scratch editor of choice as "Unsandboxed".
 
