@@ -1252,7 +1252,6 @@ SOFTWARE.
                     {
 						opcode: "get_peers",
 						blockType: Scratch2.BlockType.REPORTER,
-                        disableMonitor: true,
 						text: "All connected players",
 					},
                     {
