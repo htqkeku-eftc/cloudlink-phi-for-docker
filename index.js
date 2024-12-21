@@ -1146,7 +1146,7 @@ SOFTWARE.
 						arguments: {
 							SERVER: {
 								type: Scratch2.ArgumentType.STRING,
-								defaultValue: "ws://localhost:3000/",
+								defaultValue: "wss://phi.mikedev101.cc",
 							},
 						},
 					},
