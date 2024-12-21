@@ -1083,6 +1083,14 @@ SOFTWARE.
                         },
                     },
                     {
+                        blockType: Scratch2.BlockType.LABEL,
+                        text: 'Unless you know what you're doing,'
+                    },
+                    {
+                        blockType: Scratch2.BlockType.LABEL,
+                        text: 'do NOT change the values below.'
+                    },
+                    {
                         opcode: "changeTurnOnlyMode",
                         blockType: Scratch2.BlockType.COMMAND,
                         text: "Use TURN only? [TURNONLY]",
