@@ -1,5 +1,3 @@
-'use strict';
-
 /*
 CloudLink Phi Extension for Scratch 3.0
 
@@ -32,6 +30,7 @@ SOFTWARE.
 // By: MikeDEV
 // License: MIT
 (function (Scratch2) {
+    'use strict';
 
     // Error handling for fatal issues
 	function fatalAlert(message) {
@@ -237,6 +236,7 @@ SOFTWARE.
             this.eventCallbacks = new Map();
             this.peerConnectedEvents = new Map();
             this.peerDisconnectedEvents = new Map();
+            this.privateMessageCallbacks = new Map();
             this.seenPeers = new Map();
             this.id = null;
             this.session = null;
@@ -249,8 +249,17 @@ SOFTWARE.
             this.disconnectedEvent = null;
             this.usernameSetEvent = null;
             this.fetchedLobbyListEvent = null;
+            this.fetchedLobbyInfoEvent = null;
             this.keepalive = false;
             this.usernameSet = false;
+
+            /* Broadcast storage 
+            {
+                data: null,
+                origin: null,
+            }; */
+            this.broadcastEvent = null;
+            this.broadcastStore = new Map();
 
             // Flags
             this.relayEnabled = false;
@@ -261,6 +270,11 @@ SOFTWARE.
             this.encryption = new Encryption();
             this.publicKey = "";
             this.privateKey = "";
+        }
+
+        Connected() {
+            const self = this;
+            return (self.socket != null && self.socket.readyState == WebSocket.OPEN);
         }
 
         Connect(url) {
@@ -303,9 +317,24 @@ SOFTWARE.
             self.sendSignalingMessage("LOBBY_LIST", null, null)
         }
 
+        OnGlobalBroadcast(callback) {
+            const self = this;
+            self.broadcastEvent = callback;
+        }
+
+        OnPeerPrivateMessage(peer, callback) {
+            const self = this;
+            self.privateMessageCallbacks.set(peer, callback);
+        }
+
         OnLobbyList(callback) {
             const self = this;
             self.fetchedLobbyListEvent = callback;
+        }
+
+        OnLobbyInfo(callback) {
+            const self = this;
+            self.fetchedLobbyInfoEvent = callback;
         }
 
         WhenConnected(callback) {
@@ -403,6 +432,11 @@ SOFTWARE.
                 username,
                 sharedKey,
                 dataChannels: new Map(),
+                destroyedChannels: new Array(),
+                /* Private Channels: {
+                    data: null,
+                },*/ 
+                privateStore: new Map(),
             }
 
             const dataChannel = peerConnection.conn.createDataChannel("default", { protocol: "clomega", negotiated: true, id: 0, ordered: true });
@@ -410,6 +444,7 @@ SOFTWARE.
             self.bindChannelHandlers(dataChannel, peerId);
 
             peerConnection.conn.ondatachannel = (event) => {
+                if (!event.channel) return;
                 const dataChannel = event.channel;
                 if (peerConnection.dataChannels.has(dataChannel.label)) return;
                 peerConnection.dataChannels.set(dataChannel.label, dataChannel);
@@ -448,34 +483,110 @@ SOFTWARE.
             return peerConnection;
         }
 
-        bindChannelHandlers(dataChannel, peerId) {
+        OpenChannel(peerId, channel, ordered) {
+            const self = this;
+            if (!self.peers.has(peerId)) return;
+            const peerConnection = self.peers.get(peerId);
+            const dataChannel = peerConnection.conn.createDataChannel(channel, { protocol: "clomega", ordered });
+            peerConnection.dataChannels.set(channel, dataChannel);
+            self.bindChannelHandlers(dataChannel, peerId);
+        }
+
+        CloseChannel(peerId, channel) {
+            const self = this;
+            if (!self.peers.has(peerId)) return;
+            const peerConnection = self.peers.get(peerId);
+            if (!peerConnection.dataChannels.has(channel)) return;
+            if (channel == "default") {
+                console.warn("Cannot close default data channel. Close the connection with the peer instead.");
+                return;
+            };
+            const dataChannels = peerConnection.dataChannels;
+            if (!dataChannels.has(channel)) return;
+            dataChannels.get(channel).close();
+        }
+
+        bindChannelHandlers(channel, peerId) {
             const self = this;
 
-            dataChannel.onopen = () => {
-                if (self.peerConnectedEvents.has(peerId)) self.peerConnectedEvents.get(peerId)();
+            channel.onopen = () => {
+                const peerConnection = self.peers.get(peerId);
+                if (peerConnection.destroyedChannels.includes(channel.label)) {
+                    peerConnection.destroyedChannels.splice(peerConnection.destroyedChannels.indexOf(channel.label), 1);
+                };
+
+                if (self.peerConnectedEvents.has(peerId))
+                    self.peerConnectedEvents.get(peerId)(channel.label);
             }
 
-            dataChannel.onclose = async () =>  {
-                await self.closeConnection(peerId);
+            channel.onclose = () =>  {
+                if (self.peers.has(peerId)) {
+                    const peerConnection = self.peers.get(peerId);
+                    peerConnection.dataChannels.delete(channel.label);
+                    peerConnection.privateStore.delete(channel.label);
+                    if (!peerConnection.destroyedChannels.includes(channel.label)) peerConnection.destroyedChannels.push(channel.label);
+                }
+                if ((channel.label != "default") && (self.peerDisconnectedEvents.has(peerId)))
+                    self.peerDisconnectedEvents.get(peerId)(channel.label);
             }
 
-            dataChannel.onmessage = async (event) => {
+            channel.onmessage = async (event) => {
                 let packet = JSON.parse(event.data);
+
+                // Read data and handle accordingly if relayed
                 let relayed = false;
                 let originPeer = peerId;
+                let intendedChannel = channel;
+
                 if (packet.origin) {
                     originPeer = packet.origin.id;
                     relayed = true;
                 }
+
                 if (!self.peers.has(originPeer)) {
-                    throw new Error(`Peer ${originPeer} not found.`);
-                };
+                    console.warn(`Peer ${originPeer} not found.`);
+                    return;
+                }
+                
+                if (packet.channel) {
+                    
+                    // Check if channel exists
+                    if (!self.peers.get(originPeer).dataChannels.has(packet.channel)) {
+                        console.warn(`Channel ${packet.channel} not found with peer ${originPeer}.`);
+                        return;
+                    }
+
+                    intendedChannel = self.peers.get(originPeer).dataChannels.get(packet.channel);
+                }
+
+                // Decrypt if encrypted
                 let pc = self.peers.get(originPeer);
                 if (pc.sharedKey) { 
                     packet.payload = await this.encryption.decrypt(packet.payload[0], packet.payload[1], pc.sharedKey);
-                    console.log(packet.payload);
                 }
-                if (self.messageCallbacks.has(originPeer)) self.messageCallbacks.get(originPeer)(dataChannel.label, packet.payload, relayed);
+
+                // Handle opcode-specific callbacks
+                const peerConnection = self.peers.get(originPeer);
+                switch (packet.opcode) {
+                    case "G_MSG":
+                        self.broadcastStore.set(intendedChannel.label, {
+                            data: packet.payload,
+                            origin: originPeer,
+                        });
+                        if (self.broadcastEvent) self.broadcastEvent(intendedChannel.label, packet.payload, originPeer);
+                        break;
+                    case "P_MSG":
+                        peerConnection.privateStore.set(intendedChannel.label, {
+                            data: packet.payload,
+                        });
+                        if (self.privateMessageCallbacks.has(originPeer)) self.privateMessageCallbacks.get(originPeer)(intendedChannel.label, packet.payload);
+                        break;
+
+                    // TODO: Handle other in-band opcodes here in Omega client
+                }
+
+                // Handle generic callbacks
+                if (self.messageCallbacks.has(originPeer)) self.messageCallbacks.get(originPeer)(intendedChannel.label, packet.payload, relayed);
             }
         }
 
@@ -561,41 +672,61 @@ SOFTWARE.
             await peerConnection.conn.addIceCandidate(new RTCIceCandidate(candidate));
         }
 
-        sendMessage(peerId, channel, opcode, data, relay = false) {
+        async sendMessage(peerId, channel, opcode, data, relay = false, wait = false) {
             const self = this;
-            if (!self.peers.has(peerId)) {
-                throw new Error(`No connection found for peer ${peerId}`);
-            }
-            if (!["object", "string", "number"].includes(typeof data) && !Array.isArray(data)) {
-                throw new Error("Payload must be an Object, Array, Number, or String.");
-            }
-            let packet = { opcode };
-            if (relay) {
-                if (!self.relayEnabled) {
-                    throw new Error(`Can't use server-side relay since no relay peer was detected`);
+
+            return new Promise((resolve, reject) => {
+                if (!self.peers.has(peerId)) {
+                    reject(`No connection found for peer ${peerId}`);
+                    return;
                 }
-                packet.recipient = peerId;
-                peerId = "relay";
-            }
-            const peerConnection = self.peers.get(peerId);
-            if (!peerConnection.dataChannels.has(channel)) {
-                throw new Error(`Data channel ${channel} not found with peer ${peerConnection.username} (${peerId})`)
-            }
-            const dataChannel = peerConnection.dataChannels.get(channel);
-            if (dataChannel.readyState !== "open") {
-                throw new Error(`Data channel ${channel} with ${peerConnection.username} (${peerId}) is not open.`);
-            }
-            if (peerConnection.sharedKey) {
-                self.encryption.encrypt(JSON.stringify(payload), peerConnection.sharedKey).then(([encrypted, iv]) => {
-                    packet.payload = [encrypted, iv];
+                if (!["object", "string", "number"].includes(typeof data) && !Array.isArray(data)) {
+                    reject("Payload must be an Object, Array, Number, or String.");
+                    return;
+                }
+                let packet = { opcode };
+                if (relay) {
+                    if (!self.relayEnabled) {
+                        reject(`Can't use server-side relay since no relay peer was detected`);
+                        return;
+                    }
+                    packet.recipient = peerId;
+                    packet.channel = channel;
+                    peerId = "relay";
+                }
+                const peerConnection = self.peers.get(peerId);
+                if (!peerConnection.dataChannels.has(channel)) {
+                    reject(`Data channel ${channel} not found with peer ${peerConnection.username} (${peerId})`);
+                    return;
+                }
+                const dataChannel = peerConnection.dataChannels.get(channel);
+                if (dataChannel.readyState !== "open") {
+                    reject(`Data channel ${channel} with ${peerConnection.username} (${peerId}) is not open.`);
+                    return;
+                }
+                if (peerConnection.sharedKey) {
+                    self.encryption.encrypt(JSON.stringify(payload), peerConnection.sharedKey).then(([encrypted, iv]) => {
+                        packet.payload = [encrypted, iv];
+                        dataChannel.send(JSON.stringify(packet));
+                    }).catch((error) => {
+                        console.error(`Failed to encrypt payload for peer ${peerId}:`, error);
+                    });
+                } else {
+                    packet.payload = data;
                     dataChannel.send(JSON.stringify(packet));
-                }).catch((error) => {
-                    console.error(`Failed to encrypt payload for peer ${peerId}:`, error);
-                });
-            } else {
-                packet.payload = data;
-                dataChannel.send(JSON.stringify(packet));
-            }
+                }
+                if (wait) {
+                    const interval = setInterval(() => {
+                        if (dataChannel.bufferedAmount === 0) {
+                            clearInterval(interval);
+                            resolve();
+                        }
+                    }, 10);
+                }
+                else {
+                    resolve();
+                }
+            });
         }
 
         async closeConnection(peerId) {
@@ -609,7 +740,7 @@ SOFTWARE.
                     });
                     peerConnection.conn.close();
                     self.peers.delete(peerId);
-                    if (self.peerDisconnectedEvents.has(peerId)) self.peerDisconnectedEvents.get(peerId)();
+                    if (self.peerDisconnectedEvents.has(peerId)) self.peerDisconnectedEvents.get(peerId)("default");
                 }
             });
         }
@@ -645,6 +776,11 @@ SOFTWARE.
                 // Return list of open rooms
                 case "LOBBY_LIST":
                     if (self.fetchedLobbyListEvent) self.fetchedLobbyListEvent(payload);
+                    break;
+
+                // Return lobby details
+                case "LOBBY_INFO":
+                    if (self.fetchedLobbyInfoEvent) self.fetchedLobbyInfoEvent(payload);
                     break;
 
                 // Set mode
@@ -749,13 +885,13 @@ SOFTWARE.
             if (self.eventCallbacks.has(opcode)) self.eventCallbacks.get(opcode)(payload, origin);
         }
 
-        async MakeRoom(name, password, limit, relay) {
+        async MakeRoom(name, password, limit, relay, config) {
             const self = this;
             if (!self.username) return;
             let payload = {
                 lobby_id: name,
-                allow_host_reclaim: true,
-                allow_peers_to_claim_host: false,
+                allow_host_reclaim: (config != "1"),
+                allow_peers_to_claim_host: (config == "3"),
                 max_peers: limit,
                 password: password,
                 use_server_relay: relay,
@@ -803,12 +939,23 @@ SOFTWARE.
                 if (self.socket.readyState === WebSocket.OPEN) self.socket.close();
                 self.socket = null;
             }
+            self.broadcastStore = new Map(); 
         }
     }
 
     class CloudLinkPhi {
         constructor(vm) {
             this.vm = vm;
+
+            // getting lobbies and info
+            this.lobbylist = [];
+            this.lobbyinfo = {};
+
+            // handling peers connecting and disconnecting
+            this.newestclient = {id: "", username: ""};
+            this.lastclient = {id: "", username: ""};
+
+            // Initialize client
             this.client = new PhiClient();
 
             this.client.WhenConnected(() => {
@@ -817,11 +964,6 @@ SOFTWARE.
 
             this.client.WhenUsernameSet((session) => {
                 this.vm.runtime.startHats("cloudlinkphi_on_signalling_login");
-                this.client.FetchRoomList();
-            })
-
-            this.client.OnLobbyList((rooms) => {
-                // logMessage(`There are ${rooms.length} room(s) open. ${JSON.stringify(rooms)}`);
             })
 
             this.client.WhenDisconnected(() => {
@@ -829,35 +971,62 @@ SOFTWARE.
             })
 
             this.client.BindEvent("ACK_HOST", (data) => {
-                //  logMessage(`Created room.`);
+                console.log(`Created room.`);
             })
 
             this.client.WhenChangingMode((mode) => {
-                // logMessage(`Transitioning into ${mode} mode....`);
+                console.log(`Transitioning into ${mode} mode....`);
             })
 
             this.client.BindEvent("ACK_PEER", (data) => {
-                // logMessage(`Joined room.`);
+                console.log(`Joined room.`);
             })
 
             this.client.OnOwnershipChange(() => {
-                // logMessage("Room ownership has changed. This client is now the owner.");
+                console.log("Room ownership has changed. This client is now the owner.");
             })
 
             this.client.WhenPeerSupportsEncryption((origin) => {
-                // logMessage(`${origin.user} (${origin.id}) supports E2EE.`);
+                console.log(`${origin.user} (${origin.id}) supports E2EE.`);
+            })
+
+            this.client.OnGlobalBroadcast((channel, data, origin) => {
+                this.vm.runtime.startHats('cloudlinkphi_on_broadcast_message');
             })
 
             this.client.OnNewPeer((origin, opcode) => {
-                // logMessage(`Got new peer ${origin.user} (${origin.id}) using ${opcode}.`);
-                this.client.OnPeerConnected(origin.id, () => {
-                    // logMessage(`${origin.user} (${origin.id}) has connected.`);
+                console.log(`Got new peer ${origin.user} (${origin.id}) using ${opcode}.`);
+
+                this.client.OnPeerPrivateMessage(origin.id, (channel, data) => {
+                    this.vm.runtime.startHats('cloudlinkphi_on_private_message');
                 })
-                this.client.OnPeerDisconnected(origin.id, () => {
-                    // logMessage(`${origin.user} (${origin.id}) has disconnected.`);
+
+                this.client.OnPeerConnected(origin.id, (channelid) => {
+                    if (channelid == "default") {
+                        console.log(`${origin.user} (${origin.id}) has connected.`);
+                        this.newestclient = origin;
+                        this.vm.runtime.startHats("cloudlinkphi_on_new_peer");
+                        return;
+                    }
+
+                    console.log(`${origin.user} (${origin.id}) has opened channel ${channelid}.`);
+                    this.vm.runtime.startHats("cloudlinkphi_on_dchan_open");
                 })
+
+                this.client.OnPeerDisconnected(origin.id, (channelid) => {
+                    if (channelid == "default") {
+                        console.log(`${origin.user} (${origin.id}) has disconnected.`);
+                        this.lastclient = origin;
+                        this.vm.runtime.startHats("cloudlinkphi_on_close_peer");
+                        return;
+                    }
+
+                    console.log(`${origin.user} (${origin.id}) has closed channel ${channelid}.`);
+                    this.vm.runtime.startHats("cloudlinkphi_on_dchan_close");
+                })
+
                 this.client.OnPeerMessage(origin.id, (channel, data, relayed) => {
-                    // logMessage(`Got packet from ${origin.user} (${origin.id}) in channel ${channel} (was relayed? ${relayed}): ${data}`);
+                    console.log(`Got packet from ${origin.user} (${origin.id}) in channel ${channel} (was relayed? ${relayed}): ${String(data).length} bytes`);
                 })
             })
         }
@@ -887,9 +1056,7 @@ SOFTWARE.
 						blockType: Scratch2.BlockType.REPORTER,
 						text: "Protocol version",
 					},
-
                     "---",
-
                     {
                         blockType: Scratch2.BlockType.LABEL,
                         text: '🔧 Configuration'
@@ -956,33 +1123,22 @@ SOFTWARE.
                             },
                         },
                     },
-
                     "---",
-
                     {
 						blockType: Scratch2.BlockType.LABEL,
 						text: '🔌 Connectivity'
 					},
-
-                    {
-						opcode: "is_signalling_connected",
-						blockType: Scratch2.BlockType.BOOLEAN,
-						text: "Connected to server?",
-					},
-
                     {
 						opcode: "on_signalling_connect",
 						blockType: Scratch2.BlockType.EVENT,
                         isEdgeActivated: false,
 						text: "When connected",
 					},
-					{
-						opcode: "on_signalling_disconnect",
-						blockType: Scratch2.BlockType.EVENT,
-                        isEdgeActivated: false,
-						text: "When disconnected",
+                    {
+						opcode: "is_signalling_connected",
+						blockType: Scratch2.BlockType.BOOLEAN,
+						text: "Connected to server?",
 					},
-					
                     {
 						opcode: "initialize",
 						blockType: Scratch2.BlockType.COMMAND,
@@ -994,19 +1150,29 @@ SOFTWARE.
 							},
 						},
 					},
+                    "---",
+					{
+						opcode: "on_signalling_disconnect",
+						blockType: Scratch2.BlockType.EVENT,
+                        isEdgeActivated: false,
+						text: "When disconnected",
+					},
                     {
-                        opcode: "disconnect",
+                        opcode: "leave",
                         blockType: Scratch2.BlockType.COMMAND,
                         text: "Disconnect from server",
                     },
-
                     "---",
-
                     {
 						blockType: Scratch2.BlockType.LABEL,
 						text: '🙂 My Session'
 					},
-
+                    {
+						opcode: "on_signalling_login",
+						blockType: Scratch2.BlockType.EVENT,
+                        isEdgeActivated: false,
+						text: "When username synced",
+					},
 					{
 						opcode: "my_ID",
 						blockType: Scratch2.BlockType.REPORTER,
@@ -1017,25 +1183,11 @@ SOFTWARE.
 						blockType: Scratch2.BlockType.REPORTER,
 						text: "My Username",
 					},
-					{
-						opcode: "get_client_mode",
-						blockType: Scratch2.BlockType.REPORTER,
-						text: "Am I a host or a peer?",
-					},
-
                     {
 						opcode: "is_signaling_auth_success",
 						blockType: Scratch2.BlockType.BOOLEAN,
 						text: "Username synced?",
 					},
-
-                    {
-						opcode: "on_signalling_login",
-						blockType: Scratch2.BlockType.EVENT,
-                        isEdgeActivated: false,
-						text: "When username synced",
-					},
-
                     {
 						opcode: "authenticate",
 						blockType: Scratch2.BlockType.COMMAND,
@@ -1047,48 +1199,451 @@ SOFTWARE.
 							},
 						},
 					},
-
-                    /* {
-                        blockType: Scratch2.BlockType.LABEL,
-                        text: 'This is a label',
-                    },
+                    "---",
                     {
-                        opcode: "dummy_reporter",
+						blockType: Scratch2.BlockType.LABEL,
+						text: '👥 Players'
+					},
+                    {
+						opcode: "on_new_peer",
+						blockType: Scratch2.BlockType.EVENT,
+                        shouldRestartExistingThreads: true,
+                        isEdgeActivated: false,
+						text: "When a player connects",
+					},
+                    {
+						opcode: "get_new_peer",
+						blockType: Scratch2.BlockType.REPORTER,
+						text: "Newest player connected",
+					},
+                    "---",
+                    {
+						opcode: "on_close_peer",
+						blockType: Scratch2.BlockType.EVENT,
+                        shouldRestartExistingThreads: true,
+                        isEdgeActivated: false,
+						text: "When a player disconnects",
+					},
+                    {
+                        opcode: "get_last_peer",
                         blockType: Scratch2.BlockType.REPORTER,
-                        text: "This is a reporter",
+                        text: "Last player disconnected",
                     },
                     {
-                        opcode: "dummy_boolean",
+						opcode: "disconnect_peer",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Close connection with player [PEER]",
+						arguments: {
+							PEER: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Player ID",
+							},
+						},
+					},
+                    "---",
+                    {
+						opcode: "get_peers",
+						blockType: Scratch2.BlockType.REPORTER,
+                        disableMonitor: true,
+						text: "All connected players",
+					},
+                    {
+						opcode: "is_peer_connected",
+						blockType: Scratch2.BlockType.BOOLEAN,
+						text: "Connected to player [PEER]?",
+						arguments: {
+							PEER: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Player ID",
+							},
+						},
+					},
+                    {
+                        opcode: "get_peer_username",
+                        blockType: Scratch2.BlockType.REPORTER,
+                        text: "Get Username of [PEER]",
+                        arguments: {
+                            PEER: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Player ID",
+                            },
+                        },
+                    },
+                    {
+                        opcode: "get_all_peer_matches",
+                        blockType: Scratch2.BlockType.REPORTER,
+                        text: "Get Player IDs of all usernames matching [USERNAME]",
+                        arguments: {
+                            USERNAME: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Apple",
+                            },
+                        },
+                    },
+                    "---",
+					{
+						blockType: Scratch2.BlockType.LABEL,
+						text: '🚪 Rooms'
+					},
+                    {
+						opcode: "is_host",
+						blockType: Scratch2.BlockType.BOOLEAN,
+						text: "Am I the room host?",
+					},
+                    {
+						opcode: "is_peer",
+						blockType: Scratch2.BlockType.BOOLEAN,
+						text: "Am I a room member?",
+					},
+                    "---",
+                    {
+						blockType: Scratch2.BlockType.LABEL,
+						text: 'Setting the limit to zero will'
+					},
+                    {
+						blockType: Scratch2.BlockType.LABEL,
+						text: 'allow unlimited players to join.'
+					},
+                    {
+						blockType: Scratch2.BlockType.LABEL,
+						text: 'Make sure to exercise caution.'
+					},
+                    {
+						opcode: "init_host_mode",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Create room [LOBBY] limit the number of players to [PEERS] set password to [PASSWORD] and [CLAIMCONFIG] use server relay? [USERELAY]",
+						arguments: {
+							LOBBY: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Apple",
+							},
+							PEERS: {
+								type: Scratch2.ArgumentType.NUMBER,
+								defaultValue: 0,
+							},
+							PASSWORD: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Banana",
+							},
+							CLAIMCONFIG: {
+								type: Scratch2.ArgumentType.NUMBER,
+								menu: "lobbyConfigMenu",
+								defaultValue: 1,
+							},
+							USERELAY: {
+								type: Scratch2.ArgumentType.BOOLEAN,
+								defaultValue: false,
+							}
+						},
+					},
+                    "---",
+                    {
+						opcode: "init_peer_mode",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Join room [LOBBY] with password [PASSWORD]",
+						arguments: {
+							LOBBY: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Apple",
+							},
+							PASSWORD: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Banana",
+							},
+						},
+					},
+                    "---",
+                    {
+						opcode: "lobby_list",
+						blockType: Scratch2.BlockType.REPORTER,
+						text: "All rooms",
+					},
+					{
+						opcode: "query_lobbies",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Refresh rooms list",
+					},
+                    "---",
+					{
+						opcode: "lobby_info",
+						blockType: Scratch2.BlockType.REPORTER,
+						text: "Room info",
+					},
+					{
+						opcode: "query_lobby",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Get info about room [LOBBY]",
+						arguments: {
+							LOBBY: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Apple",
+							},
+						},
+					},
+
+                    "---",
+                    {
+						blockType: Scratch2.BlockType.LABEL,
+						text: '🔃 Networking'
+					},
+                    {
+						opcode: "on_broadcast_message",
+						blockType: Scratch2.BlockType.HAT,
+						isEdgeActivated: false,
+						text: "On broadcast message in channel [CHANNEL]",
+						arguments: {
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "default",
+							},
+						},
+					},
+					{
+						opcode: "get_global_channel_data",
+						blockType: Scratch2.BlockType.REPORTER,
+						text: "Broadcast [CHANNEL] data",
+						arguments: {
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "default",
+							},
+						},
+					},
+                    {
+						opcode: "get_global_channel_origin",
+						blockType: Scratch2.BlockType.REPORTER,
+						text: "Broadcast [CHANNEL] origin",
+                        arguments: {
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "default",
+							},
+						},
+					},
+                    {
+						opcode: "broadcast",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Broadcast [DATA] to everyone that has channel [CHANNEL] and wait? [WAIT] use server relay? [RELAY]",
+						arguments: {
+							DATA: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Hello",
+							},
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "default",
+							},
+							WAIT: {
+								type: Scratch2.ArgumentType.BOOLEAN,
+								defaultValue: false,
+							},
+                            RELAY: {
+								type: Scratch2.ArgumentType.BOOLEAN,
+								defaultValue: false,
+							},
+						},
+					},
+                    "---",
+					{
+						opcode: "on_private_message",
+						blockType: Scratch2.BlockType.HAT,
+						isEdgeActivated: false,
+						text: "On private message from player [PEER] in channel [CHANNEL]",
+						arguments: {
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "default",
+							},
+							PEER: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Player ID",
+							},
+						},
+					},
+					{
+						opcode: "get_private_channel_data",
+						blockType: Scratch2.BlockType.REPORTER,
+						text: "Private channel [CHANNEL] data from player [PEER]",
+						arguments: {
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "default",
+							},
+							PEER: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "ID",
+							},
+						},
+					},
+                    {
+						opcode: "send",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Send private data [DATA] to player [PEER] using channel [CHANNEL] and wait? [WAIT]",
+						arguments: {
+							DATA: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Hello",
+							},
+							PEER: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Player ID",
+							},
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "default",
+							},
+							WAIT: {
+								type: Scratch2.ArgumentType.BOOLEAN,
+								defaultValue: false,
+							},
+						},
+					},
+                    "---",
+                    {
+						blockType: Scratch2.BlockType.LABEL,
+						text: '📡 Channels'
+					},
+                    {
+                        opcode: "get_dchan_state",
                         blockType: Scratch2.BlockType.BOOLEAN,
-                        text: "This is a boolean"
+                        text: "Does player [PEER] have channel [CHANNEL]?",
+                        arguments: {
+                            PEER: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Player ID",
+                            },
+                            CHANNEL: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Apple",
+                            },
+                        }
                     },
                     {
-                        opcode: "dummy_command",
-                        blockType: Scratch2.BlockType.COMMAND,
-                        text: "This is a command",
+                        opcode: "get_peer_channels",
+                        blockType: Scratch2.BlockType.REPORTER,
+                        text: "All channels with player [PEER]",
+                        arguments: {
+                            PEER: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Player ID",
+                            },
+                        }
                     },
+                    "---",
                     {
-                        opcode: "dummy_hat",
+						opcode: "on_dchan_open",
                         blockType: Scratch2.BlockType.HAT,
-                        text: "This is a hat",
-                    },
+                        shouldRestartExistingThreads: true,
+                        isEdgeActivated: false,
+						text: "When player [PEER] opens channel [CHANNEL]",
+                        arguments: {
+                            PEER: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Player ID",
+                            },
+                            CHANNEL: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Apple",
+                            },
+                        }
+					},
                     {
-                        opcode: "dummy_event",
-                        blockType: Scratch2.BlockType.EVENT,
-                        text: "This is a event",
-                    }, */
+						opcode: "new_dchan",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Open a new channel named [CHANNEL] with player [PEER] and prefer [ORDERED]",
+						arguments: {
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Apple",
+							},
+							PEER: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Player ID",
+							},
+							ORDERED: {
+								type: Scratch2.ArgumentType.NUMBER,
+								menu: "channelConfig",
+								defaultValue: 1,
+							},
+						},
+					},
+                    "---",
+                    {
+						opcode: "on_dchan_close",
+                        blockType: Scratch2.BlockType.HAT,
+                        shouldRestartExistingThreads: true,
+						isEdgeActivated: false,
+						text: "When player [PEER] closes channel [CHANNEL]",
+                        arguments: {
+                            PEER: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Player ID",
+                            },
+                            CHANNEL: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "Apple",
+                            },
+                        }
+					},
+                    {
+						opcode: "close_dchan",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Close channel called [CHANNEL] with player [PEER]",
+						arguments: {
+							CHANNEL: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Apple",
+							},
+							PEER: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "Player ID",
+							},
+						},
+					},
                 ],
+                menus: {
+					lobbyConfigMenu: {
+						acceptReporters: true,
+						items: [
+							{
+								text: "don't allow this room to be reclaimed",
+								value: "1",
+							},
+							{
+								text: "allow the server to reclaim the room",
+								value: "2",
+							},
+							{
+								text: "allow peers to reclaim the room",
+								value: "3",
+							}
+						],
+					},
+                    channelConfig: {
+						acceptReporters: true,
+						items: [
+							{
+								text: "reliability and order",
+								value: "1",
+							},
+							{
+								text: "speed",
+								value: "2",
+							},
+						],
+					},
+                },
             }
         }
 
         isKeepaliveOn() {
             const self = this;
-            return self.client.enableKeepalive;
+            return Scratch2.Cast.toBoolean(self.client.enableKeepalive);
         }
 
         isTurnOnlyModeOn() {
             const self = this;
-            return self.client.turn_only;
+            return Scratch2.Cast.toBoolean(self.client.turn_only);
         }
 
         changeKeepalive({ KEEPALIVE }) {
@@ -1103,69 +1658,305 @@ SOFTWARE.
 
         change_stun_url({ URL }) {
             const self = this;
-            self.client.stun_url = URL;
+            self.client.stun_url = Scratch2.Cast.toString(URL);
         }
 
         change_turn_url({ URL, USER, PASS }) {
             const self = this;
-            self.client.turn_url = URL;
-            self.client.turn_username = USER;
-            self.client.turn_password = PASS;
+            self.client.turn_url = Scratch2.Cast.toString(URL);
+            self.client.turn_username = Scratch2.Cast.toString(USER);
+            self.client.turn_password = Scratch2.Cast.toString(PASS);
         }
 
         extension_version() {
             const self = this;
-			return self.client.metadata.client_version;
+			return Scratch2.Cast.toString(self.client.metadata.client_version);
 		}
 
 		api_version() {
             const self = this;
-			return self.client.metadata.signaling_version;
+			return Scratch2.Cast.toString(self.client.metadata.signaling_version);
 		}
 
 		protocol_version() {
             const self = this;
-			return self.client.metadata.protocol_version;
+			return Scratch2.Cast.toString(self.client.metadata.protocol_version);
 		}
 
         is_signalling_connected() {
             const self = this;
-            return ((self.client.socket != null) && self.client.socket.readyState == WebSocket.OPEN);
+            return Scratch2.Cast.toBoolean(self.client.Connected());
         }
 
         is_signaling_auth_success() {
             const self = this;
-            return self.client.usernameSet;
+            return Scratch2.Cast.toBoolean(self.client.usernameSet);
         }
 
         initialize({ SERVER }) {
             const self = this;
-            self.client.Connect(SERVER);
+            self.client.Connect(Scratch2.Cast.toString(SERVER));
         }
 
         authenticate({ TOKEN }) {
             const self = this;
-            self.client.SetUsername(TOKEN);
+            self.client.SetUsername(Scratch2.Cast.toString(TOKEN));
         }
 
-        disconnect() {
+        async init_host_mode({ LOBBY, PEERS, PASSWORD, CLAIMCONFIG, USERELAY }) {
+            const self = this;
+            await self.client.MakeRoom(
+                Scratch2.Cast.toString(LOBBY), 
+                Scratch2.Cast.toString(PASSWORD), 
+                Scratch2.Cast.toNumber(PEERS), 
+                Scratch2.Cast.toBoolean(USERELAY),
+                Scratch2.Cast.toNumber(CLAIMCONFIG));
+        }
+
+        async init_peer_mode({ LOBBY, PASSWORD }) {
+            const self = this;
+            await self.client.JoinRoom(Scratch2.Cast.toString(LOBBY), Scratch2.Cast.toString(PASSWORD));
+        }
+
+        lobby_list() {
+            const self = this;
+            return JSON.stringify(self.lobbylist);  
+        }
+
+        lobby_info() {
+            const self = this;
+            return JSON.stringify(self.lobbyinfo);
+        }
+
+        async query_lobby({ LOBBY }) {
+            const self = this;
+            return new Promise((resolve, reject) => {
+
+                if (!self.client.Connected()) {
+                    reject("Not connected to server.");
+                    return;
+                }
+                self.client.sendSignalingMessage("LOBBY_INFO", Scratch2.Cast.toString(LOBBY), null);
+                self.client.OnLobbyInfo((details) => {
+                    this.lobbyinfo = details;
+                    resolve();
+                })
+                this.client.BindEvent("CONFIG_REQUIRED", () => {
+                    console.log("Config required. (Hint: set your username first.)");
+                    reject();
+                })
+                this.client.BindEvent("LOBBY_NOTFOUND", () => {
+                    console.log("Room not found.");
+                    reject();
+                })
+            })
+        }
+
+        async query_lobbies() {
+            const self = this;
+            return new Promise((resolve, reject) => {
+                if (!self.client.Connected()) {
+                    reject("Not connected to server.");
+                    return;
+                }
+                self.client.FetchRoomList();
+                self.client.OnLobbyList((rooms) => {
+                    this.lobbylist = rooms;
+                    resolve();
+                })
+                this.client.BindEvent("CONFIG_REQUIRED", () => {
+                    console.log("Config required. (Hint: set your username first.)");
+                    reject();
+                })
+            })
+        }
+
+        leave() {
             const self = this;
             self.client.Close();
         }
 
+        async broadcast({DATA, CHANNEL, WAIT, RELAY}) {
+            const self = this;
+
+            if (Scratch2.Cast.toBoolean(RELAY)) {
+                if (self.client.relayEnabled) {
+                    // Use server-side relay to broadcast
+                    return self.client.sendMessage(
+                        "relay",
+                        "default",
+                        "G_MSG",
+                        Scratch2.Cast.toString(DATA),
+                        true,
+                        Scratch2.Cast.toBoolean(WAIT),
+                    );
+                }
+            }
+
+            // Manually broadcast
+            let promises = new Array();
+            for (let peer of self.client.peers.keys()) {
+                promises.push(self.client.sendMessage(
+                    peer,
+                    Scratch2.Cast.toString(CHANNEL),
+                    "G_MSG",
+                    Scratch2.Cast.toString(DATA),
+                    false,
+                    Scratch2.Cast.toBoolean(WAIT),
+                ));
+            }
+            return Promise.all(promises);
+        }
+
+        async send({DATA, PEER, CHANNEL, WAIT}) {
+            const self = this;
+            return self.client.sendMessage(
+                Scratch2.Cast.toString(PEER),
+                Scratch2.Cast.toString(CHANNEL),
+                "P_MSG",
+                Scratch2.Cast.toString(DATA),
+                false,
+                Scratch2.Cast.toBoolean(WAIT),
+            );
+        }
+
+        on_dchan_open({ PEER, CHANNEL }) {
+            const self = this;           
+            if (!self.client.peers.has(Scratch2.Cast.toString(PEER))) return false;
+            const peerConnection = self.client.peers.get(Scratch2.Cast.toString(PEER));
+            if (!peerConnection.dataChannels.has(Scratch2.Cast.toString(CHANNEL))) return false;
+            return true;
+        }
+
+        on_dchan_close({ PEER, CHANNEL }) {
+            const self = this;
+            if (!self.client.peers.has(Scratch2.Cast.toString(PEER))) return false;
+            const peerConnection = self.client.peers.get(Scratch2.Cast.toString(PEER));
+            if (!peerConnection.destroyedChannels.includes(Scratch2.Cast.toString(CHANNEL))) return false;
+            return true;
+        }
+
+        new_dchan({ CHANNEL, PEER, ORDERED }) {
+            const self = this;
+            self.client.OpenChannel(
+                Scratch2.Cast.toString(PEER),
+                Scratch2.Cast.toString(CHANNEL),
+                Scratch2.Cast.toBoolean(ORDERED)
+            );
+        }
+
+        close_dchan({ CHANNEL, PEER }) {
+            const self = this;
+            self.client.CloseChannel(
+                Scratch2.Cast.toString(PEER),
+                Scratch2.Cast.toString(CHANNEL)
+            );
+        }
+
+        get_new_peer() {
+            const self = this;
+            return JSON.stringify(self.newestclient);
+        }
+
+        get_last_peer() {
+            const self = this;
+            return JSON.stringify(self.lastclient);
+        }
+
+        get_peers() {
+            const self = this;
+            return JSON.stringify(Array.from(self.client.peers, ([id, peer]) => ({ id, username: peer.username })));
+        }
+
+        get_all_peer_matches({ USERNAME }) {
+            const self = this;
+            return JSON.stringify(Array.from(self.client.peers).filter(([_, peer]) => peer.username === USERNAME).map(([key]) => key));
+        }
+
+        get_peer_username({ PEER }) {
+            const self = this;
+            return (self.client.peers.has(Scratch2.Cast.toString(PEER))) ? Scratch2.Cast.toString(self.client.peers.get(Scratch2.Cast.toString(PEER)).username) : "";
+        }
+
+        get_peer_channels({ PEER }) {
+            const self = this;
+            if (!self.client.peers.has(Scratch2.Cast.toString(PEER))) return "[]";
+            const peerConnection = self.client.peers.get(Scratch2.Cast.toString(PEER));
+            return JSON.stringify(Array.from(peerConnection.dataChannels).map(([key]) => key));
+        }
+
+        is_peer_connected({ PEER }) {
+            const self = this;
+            return self.client.peers.has(Scratch2.Cast.toString(PEER));
+        }
+
+        get_dchan_state({ PEER, CHANNEL }) {
+            const self = this;
+            if (!self.client.peers.has(Scratch2.Cast.toString(PEER))) return false;
+            if (!self.client.peers.get(Scratch2.Cast.toString(PEER)).dataChannels.has(Scratch2.Cast.toString(CHANNEL))) return false;
+            return self.client.peers.get(Scratch2.Cast.toString(PEER)).dataChannels.get(Scratch2.Cast.toString(CHANNEL)).readyState === "open";
+        }
+
+        async disconnect_peer({ PEER }) {
+            const self = this;
+            await self.client.closeConnection(Scratch2.Cast.toString(PEER));
+        }
+
         my_ID() {
             const self = this;
-            return (self.client.id != null) ? self.client.id : "";
+            return (self.client.id != null) ? Scratch2.Cast.toString(self.client.id) : "";
         }
 
         my_Username() {
             const self = this;
-            return (self.client.username != null) ? self.client.username : "";
+            return (self.client.username != null) ? Scratch2.Cast.toString(self.client.username) : "";
         }
 
-        get_client_mode() {
+        is_host() {
             const self = this;
-            return ["", "host", "peer"][self.client.mode];
+            return self.client.mode == 1;
+        }
+        
+        is_peer() {
+            const self = this;
+            return self.client.mode == 2;
+        }
+
+        on_broadcast_message({ CHANNEL }) {
+            const self = this;
+            if (!self.client.broadcastStore.has(Scratch2.Cast.toString(CHANNEL))) return false;
+            return true;
+        }
+
+        get_global_channel_data({ CHANNEL }) {
+            const self = this;
+            if (!self.client.broadcastStore.has(Scratch2.Cast.toString(CHANNEL))) return "";
+            const storage = self.client.broadcastStore.get(Scratch2.Cast.toString(CHANNEL));
+            return Scratch2.Cast.toString(storage.data);
+        }
+
+        get_global_channel_origin({ CHANNEL }) {
+            const self = this;
+            if (!self.client.broadcastStore.has(Scratch2.Cast.toString(CHANNEL))) return "";
+            const storage = self.client.broadcastStore.get(Scratch2.Cast.toString(CHANNEL));
+            return Scratch2.Cast.toString(storage.origin);
+        }
+
+        on_private_message({ PEER, CHANNEL }) {
+            const self = this;
+            if (!self.client.peers.has(Scratch2.Cast.toString(PEER))) return false;
+            const peerConnection = self.client.peers.get(Scratch2.Cast.toString(PEER));
+            if (!peerConnection.privateStore.has(Scratch2.Cast.toString(CHANNEL))) return false;
+            return true;
+        }
+
+        get_private_channel_data({ PEER, CHANNEL }) {
+            const self = this;            
+            if (!self.client.peers.has(Scratch2.Cast.toString(PEER))) return "";
+            const peerConnection = self.client.peers.get(Scratch2.Cast.toString(PEER));
+            if (!peerConnection.privateStore.has(Scratch2.Cast.toString(CHANNEL))) return "";
+            const storage = peerConnection.privateStore.get(Scratch2.Cast.toString(CHANNEL));
+            return Scratch2.Cast.toString(storage.data);
         }
     }
 
