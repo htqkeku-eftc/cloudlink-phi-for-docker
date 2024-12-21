@@ -250,7 +250,7 @@ SOFTWARE.
             this.usernameSetEvent = null;
             this.fetchedLobbyListEvent = null;
             this.fetchedLobbyInfoEvent = null;
-            this.keepalive = true;
+            this.keepalive = null;
             this.usernameSet = false;
 
             /* Broadcast storage 
@@ -263,7 +263,7 @@ SOFTWARE.
 
             // Flags
             this.relayEnabled = false;
-            this.enableKeepalive = false;
+            this.enableKeepalive = true;
             this.mode = 0; // 0 - none, 1 - host, 2 - peer
 
             // End-to-end Encryption Support
