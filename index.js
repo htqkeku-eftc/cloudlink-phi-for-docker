@@ -250,7 +250,7 @@ SOFTWARE.
             this.usernameSetEvent = null;
             this.fetchedLobbyListEvent = null;
             this.fetchedLobbyInfoEvent = null;
-            this.keepalive = false;
+            this.keepalive = true;
             this.usernameSet = false;
 
             /* Broadcast storage 
