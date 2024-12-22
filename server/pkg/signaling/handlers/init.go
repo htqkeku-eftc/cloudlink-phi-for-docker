@@ -62,7 +62,7 @@ func INIT(s *structs.Server, client *structs.Client, packet *structs.SignalPacke
 		OpenLobby(s, client, &structs.HostConfigPacket{
 			Payload: &structs.LobbySettings{
 				LobbyID:             "default",
-				UseServerRelay:      true,
+				UseServerRelay:      false,
 				AllowHostReclaim:    true,
 				AllowPeersToReclaim: false,
 			},

@@ -487,6 +487,7 @@ SOFTWARE.
             const self = this;
             if (!self.peers.has(peerId)) return;
             const peerConnection = self.peers.get(peerId);
+            if (peerConnection.dataChannels.has(channel)) return;
             const dataChannel = peerConnection.conn.createDataChannel(channel, { protocol: "clomega", ordered });
             peerConnection.dataChannels.set(channel, dataChannel);
             self.bindChannelHandlers(dataChannel, peerId);
@@ -514,6 +515,8 @@ SOFTWARE.
                 if (peerConnection.destroyedChannels.includes(channel.label)) {
                     peerConnection.destroyedChannels.splice(peerConnection.destroyedChannels.indexOf(channel.label), 1);
                 };
+
+                if (peerId == "relay") return;
 
                 if (self.peerConnectedEvents.has(peerId))
                     self.peerConnectedEvents.get(peerId)(channel.label);
@@ -576,10 +579,8 @@ SOFTWARE.
                         if (self.broadcastEvent) self.broadcastEvent(intendedChannel.label, packet.payload, originPeer);
                         break;
                     case "P_MSG":
-                        peerConnection.privateStore.set(intendedChannel.label, {
-                            data: packet.payload,
-                        });
-                        if (self.privateMessageCallbacks.has(originPeer)) self.privateMessageCallbacks.get(originPeer)(intendedChannel.label, packet.payload);
+                        peerConnection.privateStore.set(intendedChannel.label, packet.payload);
+                        if (self.privateMessageCallbacks.has(originPeer)) self.privateMessageCallbacks.get(originPeer)(intendedChannel.label, packet.payload, relayed);
                         break;
 
                     // TODO: Handle other in-band opcodes here in Omega client
@@ -693,6 +694,7 @@ SOFTWARE.
                     packet.recipient = peerId;
                     packet.channel = channel;
                     peerId = "relay";
+                    channel = "default";
                 }
                 const peerConnection = self.peers.get(peerId);
                 if (!peerConnection.dataChannels.has(channel)) {
@@ -997,7 +999,8 @@ SOFTWARE.
             this.client.OnNewPeer((origin, opcode) => {
                 console.log(`Got new peer ${origin.user} (${origin.id}) using ${opcode}.`);
 
-                this.client.OnPeerPrivateMessage(origin.id, (channel, data) => {
+                this.client.OnPeerPrivateMessage(origin.id, (channel, data, relayed) => {
+                    console.log(`Got private message from ${origin.user} (${origin.id}) on channel ${channel} (relayed? ${relayed}): ${data}`);
                     this.vm.runtime.startHats('cloudlinkphi_on_private_message');
                 })
 
@@ -1026,7 +1029,8 @@ SOFTWARE.
                 })
 
                 this.client.OnPeerMessage(origin.id, (channel, data, relayed) => {
-                    console.log(`Got packet from ${origin.user} (${origin.id}) in channel ${channel} (was relayed? ${relayed}): ${String(data).length} bytes`);
+                    console.log(`Got broadcast message from ${origin.user} (${origin.id}) on channel ${channel} (relayed? ${relayed}): ${data}`);
+                    this.vm.runtime.startHats('cloudlinkphi_on_broadcast_message');
                 })
             })
         }
@@ -1397,6 +1401,7 @@ SOFTWARE.
 						opcode: "on_broadcast_message",
 						blockType: Scratch2.BlockType.HAT,
 						isEdgeActivated: false,
+                        shouldRestartExistingThreads: true,
 						text: "On broadcast message in channel [CHANNEL]",
 						arguments: {
 							CHANNEL: {
@@ -1455,6 +1460,7 @@ SOFTWARE.
 						opcode: "on_private_message",
 						blockType: Scratch2.BlockType.HAT,
 						isEdgeActivated: false,
+                        shouldRestartExistingThreads: true,
 						text: "On private message from player [PEER] in channel [CHANNEL]",
 						arguments: {
 							CHANNEL: {
@@ -1791,7 +1797,7 @@ SOFTWARE.
                     // Use server-side relay to broadcast
                     return self.client.sendMessage(
                         "relay",
-                        "default",
+                        Scratch2.Cast.toString(CHANNEL),
                         "G_MSG",
                         Scratch2.Cast.toString(DATA),
                         true,
@@ -1962,8 +1968,7 @@ SOFTWARE.
             if (!self.client.peers.has(Scratch2.Cast.toString(PEER))) return "";
             const peerConnection = self.client.peers.get(Scratch2.Cast.toString(PEER));
             if (!peerConnection.privateStore.has(Scratch2.Cast.toString(CHANNEL))) return "";
-            const storage = peerConnection.privateStore.get(Scratch2.Cast.toString(CHANNEL));
-            return Scratch2.Cast.toString(storage.data);
+            return Scratch2.Cast.toString(peerConnection.privateStore.get(Scratch2.Cast.toString(CHANNEL)));
         }
     }
 
