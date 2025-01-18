@@ -443,12 +443,16 @@ SOFTWARE.
             peerConnection.dataChannels.set("default", dataChannel);
             self.bindChannelHandlers(dataChannel, peerId);
 
-            peerConnection.conn.ondatachannel = (event) => {
+            peerConnection.conn.ondatachannel = async (event) => {
                 if (!event.channel) return;
-                const dataChannel = event.channel;
-                if (peerConnection.dataChannels.has(dataChannel.label)) return;
-                peerConnection.dataChannels.set(dataChannel.label, dataChannel);
-                self.bindChannelHandlers(dataChannel, peerId);
+                await navigator.locks.request(peerId + "_channels", () => {
+                    // Even with an acquired lock, there is always the possibility of the other peer opening the same channel at the same time.
+                    // If this happens, our existing channel will be overwritten by the new one.
+                    const dataChannel = event.channel;
+                    peerConnection.dataChannels.set(dataChannel.label, dataChannel);
+                    self.bindChannelHandlers(dataChannel, peerId);
+                    console.log(`${username} (${peerId}) has opened channel ${dataChannel.label}.`);
+                });
             }
 
             peerConnection.conn.onconnectionstatechange = async () => {
@@ -483,28 +487,32 @@ SOFTWARE.
             return peerConnection;
         }
 
-        OpenChannel(peerId, channel, ordered) {
+        async OpenChannel(peerId, channel, ordered) {
             const self = this;
-            if (!self.peers.has(peerId)) return;
-            const peerConnection = self.peers.get(peerId);
-            if (peerConnection.dataChannels.has(channel)) return;
-            const dataChannel = peerConnection.conn.createDataChannel(channel, { protocol: "clomega", ordered });
-            peerConnection.dataChannels.set(channel, dataChannel);
-            self.bindChannelHandlers(dataChannel, peerId);
+            return navigator.locks.request(peerId + "_channels", () => {
+                if (!self.peers.has(peerId)) return;
+                const peerConnection = self.peers.get(peerId);
+                if (peerConnection.dataChannels.has(channel)) return;
+                const dataChannel = peerConnection.conn.createDataChannel(channel, { protocol: "clomega", ordered });
+                peerConnection.dataChannels.set(channel, dataChannel);
+                self.bindChannelHandlers(dataChannel, peerId);
+            });
         }
 
-        CloseChannel(peerId, channel) {
+        async CloseChannel(peerId, channel) {
             const self = this;
-            if (!self.peers.has(peerId)) return;
-            const peerConnection = self.peers.get(peerId);
-            if (!peerConnection.dataChannels.has(channel)) return;
-            if (channel == "default") {
-                console.warn("Cannot close default data channel. Close the connection with the peer instead.");
-                return;
-            };
-            const dataChannels = peerConnection.dataChannels;
-            if (!dataChannels.has(channel)) return;
-            dataChannels.get(channel).close();
+            return navigator.locks.request(peerId + "_channels", () => {
+                if (!self.peers.has(peerId)) return;
+                const peerConnection = self.peers.get(peerId);
+                if (!peerConnection.dataChannels.has(channel)) return;
+                if (channel == "default") {
+                    console.warn("Cannot close default data channel. Close the connection with the peer instead.");
+                    return;
+                };
+                const dataChannels = peerConnection.dataChannels;
+                if (!dataChannels.has(channel)) return;
+                dataChannels.get(channel).close();
+            });
         }
 
         bindChannelHandlers(channel, peerId) {
@@ -577,11 +585,11 @@ SOFTWARE.
                             origin: originPeer,
                         });
                         if (self.broadcastEvent) self.broadcastEvent(intendedChannel.label, packet.payload, originPeer);
-                        break;
+                        return;
                     case "P_MSG":
                         peerConnection.privateStore.set(intendedChannel.label, packet.payload);
                         if (self.privateMessageCallbacks.has(originPeer)) self.privateMessageCallbacks.get(originPeer)(intendedChannel.label, packet.payload, relayed);
-                        break;
+                        return;
 
                     // TODO: Handle other in-band opcodes here in Omega client
                 }
@@ -707,7 +715,7 @@ SOFTWARE.
                     return;
                 }
                 if (peerConnection.sharedKey) {
-                    self.encryption.encrypt(JSON.stringify(payload), peerConnection.sharedKey).then(([encrypted, iv]) => {
+                    self.encryption.encrypt(JSON.stringify(packet), peerConnection.sharedKey).then(([encrypted, iv]) => {
                         packet.payload = [encrypted, iv];
                         dataChannel.send(JSON.stringify(packet));
                     }).catch((error) => {
@@ -1029,7 +1037,7 @@ SOFTWARE.
                 })
 
                 this.client.OnPeerMessage(origin.id, (channel, data, relayed) => {
-                    console.log(`Got broadcast message from ${origin.user} (${origin.id}) on channel ${channel} (relayed? ${relayed}): ${data}`);
+                    console.log(`Got message from ${origin.user} (${origin.id}) on channel ${channel} (relayed? ${relayed}): ${data}`);
                     this.vm.runtime.startHats('cloudlinkphi_on_broadcast_message');
                 })
             })
@@ -1849,18 +1857,18 @@ SOFTWARE.
             return true;
         }
 
-        new_dchan({ CHANNEL, PEER, ORDERED }) {
+        async new_dchan({ CHANNEL, PEER, ORDERED }) {
             const self = this;
-            self.client.OpenChannel(
+            return self.client.OpenChannel(
                 Scratch2.Cast.toString(PEER),
                 Scratch2.Cast.toString(CHANNEL),
                 Scratch2.Cast.toBoolean(ORDERED)
             );
         }
 
-        close_dchan({ CHANNEL, PEER }) {
+        async close_dchan({ CHANNEL, PEER }) {
             const self = this;
-            self.client.CloseChannel(
+            return self.client.CloseChannel(
                 Scratch2.Cast.toString(PEER),
                 Scratch2.Cast.toString(CHANNEL)
             );
