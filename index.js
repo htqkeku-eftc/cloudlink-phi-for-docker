@@ -328,8 +328,12 @@ SOFTWARE.
             this.in_lan_mode = false;
             this.hosting_lan = false;
 
+            this.is_lan_connected = false;
+            this.is_lan_searching = false;
+
             this.discovery_client;
             this.discovery_server;
+            this.discovery_interval;
 
             this.lan_client;
             this.lan_host;
@@ -349,7 +353,7 @@ SOFTWARE.
             }
         }
 
-        ConnectWithLAN(host, port, username) {
+        ConnectWithLAN(host, username) {
             const self = this;
             if (!self.lan_feature_supported) {
                 console.warn("LAN feature is not supported, can't connect to a LAN host.");
@@ -369,8 +373,9 @@ SOFTWARE.
             self.username = username;
 
             // Connect to server
-            self.lan_client = self.net.createConnection({ host, port }, () => {
-                console.log(`Connected to host ${host}:${port}!`);
+            self.lan_client = self.net.createConnection({ host, port: 3100 }, () => {
+                console.log(`Connected to host ${host}!`);
+                self.is_lan_connected = true;
 
                 // Tell the server to DISCOVER us
                 self.lan_client.write(JSON.stringify({
@@ -381,6 +386,10 @@ SOFTWARE.
                         pubkey: self.publicKey,
                     }
                 }));
+
+                if (self.enableKeepalive) {
+                    self.emitMessage("KEEPALIVE", null, null, true, self.lan_client);
+                }
             });
 
             // Create metadata storage since we're in LAN mode (for the "origin" and "recipient" fields in the CL5 protocol)
@@ -388,8 +397,7 @@ SOFTWARE.
 
             // Listen for data
             self.lan_client.on('data', async (data) => {
-                console.log("Received data from LAN host:", JSON.parse(data));
-                await self.handleLANMessage(JSON.parse(data), self.lan_client);
+                await self.handleLANMessages(data, self.lan_client, false);
             });
 
             self.lan_client.on('error', (error) => {
@@ -402,6 +410,7 @@ SOFTWARE.
                 console.log('Disconnected from LAN host.');
                 self.in_lan_mode = false;
                 self.lan_client = null;
+                self.is_lan_connected = false;
             });
         }
 
@@ -418,9 +427,9 @@ SOFTWARE.
             // Can't be hosting a LAN server
             if (self.hosting_lan) return;
 
-            // Can't be in LAN mode already
-            if (self.in_lan_mode) return;
-            self.in_lan_mode = true;
+            // Can't be scanning already
+            if (self.is_lan_searching) return;
+            self.is_lan_searching = true;
             
             // discovery_client.js
             self.lan_hosts = [];
@@ -429,18 +438,24 @@ SOFTWARE.
             // Listen for any broadcast messages
             self.discovery_client.on('message', (message, rinfo) => {
                 if (message != "Packets in the stream, Voices ripple, data gleams- Signals cross the world.") return;
-                console.log(`Found a LAN host at ${rinfo.address}:${rinfo.port}`);
-                if (!self.lan_hosts.includes({address: rinfo.address, port: rinfo.port})) self.lan_hosts.push({address: rinfo.address, port: rinfo.port});
+                console.log(`Found a LAN host at ${rinfo.address}`);
+                if (!self.lan_hosts.includes(rinfo.address)) self.lan_hosts.push(rinfo.address);
             });
 
             // Show events
             self.discovery_client.on('listening', () => {
-                console.log('Now looking for hosts on LAN using UDP port 3101...');
+                console.log('Now looking for hosts on LAN...');
+
+                // Wait for up to 30 seconds to find hosts, then shut down the discovery client
+                setTimeout(() => {
+                    self.discovery_client.close();
+                }, 30000);
+
             })
 
             self.discovery_client.on('close', () => {
                 console.log('Discovery client closed.');
-                self.in_lan_mode = false;
+                self.is_lan_searching = false;
             })
 
             self.discovery_client.on('error', (err) => {
@@ -483,11 +498,9 @@ SOFTWARE.
             self.lan_host = self.net.createServer((socket) => {
                 self.lan_clients.push(socket);
                 console.log(`New LAN connection from ${socket.remoteAddress}:${socket.remotePort}`);
-
-                // Create metadata storage since we're in LAN mode (for the "origin" and "recipient" fields in the CL5 protocol)
                 socket.metadata = {};
 
-                // Very first thing we do once a connection is made is to exchange an ANTICIPATE message
+                // Tell the peer to ANTICIPATE us
                 socket.write(JSON.stringify({
                     opcode: "ANTICIPATE",
                     payload: {
@@ -498,8 +511,7 @@ SOFTWARE.
                 }));
 
                 socket.on('data', async (data) => {
-                    console.log(`LAN message from ${socket.remoteAddress}:${socket.remotePort}:`, JSON.parse(data));
-                    await self.handleLANMessage(JSON.parse(data), socket);
+                    await self.handleLANMessages(data, socket, true);
                 });
 
                 socket.on('close', () => {
@@ -509,14 +521,14 @@ SOFTWARE.
             });
 
             self.lan_host.on('listening', () => {
-                console.log(`LAN host is now running on LAN TCP port 3100!`);
+                console.log(`LAN host is now running!`);
             })
 
             // discovery_server.js
             self.discovery_server = self.dgram.createSocket('udp4');
 
             // Send multicast announcement
-            setInterval(() => {
+            self.discovery_interval = setInterval(() => {
 
                 // Send some magic message for discovery. This haiku will be multicasted at every second.
                 const message = Buffer.from("Packets in the stream, Voices ripple, data gleams- Signals cross the world.");
@@ -531,6 +543,7 @@ SOFTWARE.
             self.discovery_server.on('close', () => {
                 console.log('Discovery server closed.');
                 self.discovery_server = null;
+                clearInterval(self.discovery_interval);
             })
 
             self.discovery_server.on('error', (err) => {
@@ -567,15 +580,30 @@ SOFTWARE.
             const self = this;
             if (!self.lan_feature_supported) return;
             if (!self.hosting_lan) return;
+
+            // Tell the LAN server that we're shutting things down
             self.lan_host.close();
             self.discovery_server.close();
+
+            // Finalize shutdown by closing connections, which is required
+            self.lan_clients.forEach((client) => {
+                client.end();
+            });
+
+            // Finally, close all WebRTC connections
+            self.Close();
         }
 
         DisconnectFromLAN() {
             const self = this;
             if (!self.lan_feature_supported) return;
             if (!self.lan_client) return;
+
+            // Close the connection to the host
             self.lan_client.end();
+
+            // Finally, close all WebRTC connections
+            self.Close();
         }
 
         Connected() {
@@ -604,7 +632,7 @@ SOFTWARE.
                 }
             };
 
-            self.socket.onmessage = async (event) => await self.handleSignalingMessage(JSON.parse(event.data));
+            self.socket.onmessage = async (event) => await self.handleSignalingMessage(JSON.parse(event.data), false, null);
 
             self.socket.onerror = (error) => console.error("WebSocket error:", error);
 
@@ -889,6 +917,7 @@ SOFTWARE.
                 // Handle opcode-specific callbacks
                 const peerConnection = self.peers.get(originPeer);
                 switch (packet.opcode) {
+                    
                     case "G_MSG":
                         self.broadcastStore.set(intendedChannel.label, {
                             data: packet.payload,
@@ -896,6 +925,7 @@ SOFTWARE.
                         });
                         if (self.broadcastEvent) self.broadcastEvent(intendedChannel.label, packet.payload, originPeer);
                         return;
+                    
                     case "P_MSG":
                         peerConnection.privateStore.set(intendedChannel.label, packet.payload);
                         if (self.privateMessageCallbacks.has(originPeer)) self.privateMessageCallbacks.get(originPeer)(intendedChannel.label, packet.payload, relayed);
@@ -1065,74 +1095,55 @@ SOFTWARE.
             });
         }
 
-        emitMessage(opcode, payload, recipient, is_lan, lan_socket) {
+        async emitMessage(opcode, payload, recipient, is_lan, lan_socket) {
             const self = this;
-            let packet = { opcode };
-            if (payload) packet.payload = payload;
-            if (recipient) packet.recipient = recipient;
+            return navigator.locks.request(recipient + "_tx", () => {
+                let packet = { opcode };
+                if (payload) packet.payload = payload;
+                if (recipient) packet.recipient = recipient;
+                if (is_lan) {
+                    lan_socket.write(JSON.stringify(packet) + "\n");
+                } else {
+                    self.socket.send(JSON.stringify(packet));
+                }
+            });
+        }
+
+        async handleLANMessages(raw_packets, socket, is_host) {
+
+            // Convert raw packet buffer to string and split by delimiter ('\n')
+            const packets = raw_packets.toString().split("\n");
+        
+            // Process each complete packet
+            const promises = packets.map((message) => {
+
+                // Do nothing if message is empty
+                if (message === "") return Promise.resolve();
+
+                // Try to parse JSON
+                try {
+                    return this.handleSignalingMessage(JSON.parse(message), true, socket, is_host);
+                } catch (err) {
+                    console.error("Failed to parse JSON:", err, "Message:", message);
+                    return Promise.resolve();
+                }
+            });
+        
+            // Wait for all promises to resolve
+            return Promise.all(promises);
+        }
+
+        async handleSignalingMessage(message, is_lan = false, lan_socket = null, is_host = false) {
+            const self = this;
+            const { opcode, payload, recipient } = message;
+            let origin;
             if (is_lan) {
-                // Require a lock to transmit
-                return navigator.locks.request(recipient + "_tx", () => {
-                    lan_socket.write(JSON.stringify(packet)); // bug: need to figure out a fix for messages not being received as new events
-                });
-            } else {
-                self.socket.send(JSON.stringify(packet));
+                origin = lan_socket.metadata 
             }
-        }
+            else {
+                origin = message.origin
+            };
 
-        async handleLANMessage(message, socket) {
-            const self = this;
-            const { opcode, payload } = message;
-            const origin = socket.metadata;
-            switch (opcode) {
-                
-                // Prepare connections
-                case "ANTICIPATE":
-                    return navigator.locks.request(payload.id, async () => {
-                        await self.handleAnticipate(payload, true, socket);
-                        self.FireSeenPeerEvent(payload, opcode);
-                    })
-
-                case "DISCOVER":
-                    return navigator.locks.request(payload.id, async () => {
-                        await self.handleDiscover(payload, true, socket);
-                        self.FireSeenPeerEvent(payload, opcode);
-                    })
-                
-                // Process offer
-                case "MAKE_OFFER":
-                    return navigator.locks.request(origin.id, async () => {
-                        await self.handleOffer(origin.id, payload.contents, true, socket);
-                        self.FireSeenPeerEvent(origin, opcode);
-                    })
-                
-                // Process answer
-                case "MAKE_ANSWER":
-                    return navigator.locks.request(origin.id, async () => {
-                        await self.handleAnswer(origin.id, payload.contents);
-                    })
-                
-                // Process ICE
-                case "ICE":
-                    return navigator.locks.request(origin.id, async () => {
-                        await self.handleICECandidate(origin.id, payload.contents);
-                    })
-                
-                // Errors
-                case "VIOLATION":
-                    console.error("Protocol Violation:", payload);
-                    self.Close();
-                    break;
-                default:
-                    console.warn(`Unknown signaling message type: ${opcode}`);
-            }
-
-            if (self.eventCallbacks.has(opcode)) self.eventCallbacks.get(opcode)(payload, origin);
-        }
-
-        async handleSignalingMessage(message) {
-            const self = this;
-            const { opcode, payload, origin } = message;
             switch (opcode) {
 
                 // Session ready
@@ -1146,7 +1157,7 @@ SOFTWARE.
                 // Keep alive
                 case "KEEPALIVE":
                     self.keepalive = setTimeout(() => {
-                        self.emitMessage("KEEPALIVE", null, null);
+                        self.emitMessage("KEEPALIVE", null, null, is_lan, lan_socket);
                     }, 5000) // 5 seconds delay
                     break;
 
@@ -1214,27 +1225,27 @@ SOFTWARE.
                 // Prepare connections
                 case "NEW_PEER":
                     return navigator.locks.request(payload.id, async () => {
-                        await self.createConnection(payload.id, payload.user, payload.pubkey)
-                        await self.createOffer(payload.id);
+                        await self.createConnection(payload.id, payload.user, payload.pubkey, is_lan, lan_socket)
+                        await self.createOffer(payload.id, is_lan, lan_socket);
                         self.FireSeenPeerEvent(payload, opcode);
                     })
 
                 case "ANTICIPATE":
                     return navigator.locks.request(payload.id, async () => {
-                        await self.handleAnticipate(payload);
+                        await self.handleAnticipate(payload, is_lan, lan_socket);
                         self.FireSeenPeerEvent(payload, opcode);
                     })
 
                 case "DISCOVER":
                     return navigator.locks.request(payload.id, async () => {
-                        await self.handleDiscover(payload);
+                        await self.handleDiscover(payload, is_lan, lan_socket);
                         self.FireSeenPeerEvent(payload, opcode);
                     })
                 
                 // Process offer
                 case "MAKE_OFFER":
                     return navigator.locks.request(origin.id, async () => {
-                        await self.handleOffer(origin.id, payload.contents);
+                        await self.handleOffer(origin.id, payload.contents, is_lan, lan_socket);
                         self.FireSeenPeerEvent(origin, opcode);
                     })
                 
@@ -1457,11 +1468,6 @@ SOFTWARE.
 						blockType: Scratch2.BlockType.REPORTER,
 						text: "Protocol version",
 					},
-                    {
-                        opcode: "lan_supported",
-                        blockType: Scratch2.BlockType.BOOLEAN,
-                        text: "LAN mode supported?"
-                    },
                     "---",
                     {
                         blockType: Scratch2.BlockType.LABEL,
@@ -1564,8 +1570,7 @@ SOFTWARE.
 							},
 						},
 					},
-                    "---",
-					{
+                    {
 						opcode: "on_signalling_disconnect",
 						blockType: Scratch2.BlockType.EVENT,
                         isEdgeActivated: false,
@@ -1576,6 +1581,80 @@ SOFTWARE.
                         blockType: Scratch2.BlockType.COMMAND,
                         text: "Disconnect from server",
                     },
+                    "---",
+                    {
+						blockType: Scratch2.BlockType.LABEL,
+						text: '🖥️ LAN Mode'
+					},
+                    {
+                        opcode: "lan_supported",
+                        blockType: Scratch2.BlockType.BOOLEAN,
+                        text: "Is LAN mode supported?"
+                    },
+                    "---",
+                    {
+						opcode: "hosting_lan_server",
+						blockType: Scratch2.BlockType.BOOLEAN,
+						text: "Am I hosting a LAN server?",
+					},
+                    {
+						opcode: "host_lan_server",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Host a LAN server as username [USERNAME]",
+						arguments: {
+                            USERNAME: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "apple",
+                            },
+						},
+					},
+                    {
+						opcode: "stop_lan_server",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Shutdown LAN server",
+					},
+                    "---",
+                    {
+						opcode: "connected_to_lan",
+						blockType: Scratch2.BlockType.BOOLEAN,
+						text: "Am I connected to a LAN host?",
+					},
+                    {
+						opcode: "join_lan_server",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Connect to LAN host at IP [IP] as username [USERNAME]",
+						arguments: {
+							IP: {
+								type: Scratch2.ArgumentType.STRING,
+								defaultValue: "127.0.0.1",
+							},
+                            USERNAME: {
+                                type: Scratch2.ArgumentType.STRING,
+                                defaultValue: "banana",
+                            },
+						},
+					},
+                    {
+						opcode: "leave_lan_server",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Disconnect from LAN host",
+					},
+                    "---",
+                    {
+						opcode: "looking_for_lan_servers",
+						blockType: Scratch2.BlockType.BOOLEAN,
+						text: "Am I scanning for LAN hosts?",
+					},
+                    {
+						opcode: "find_lan_servers",
+						blockType: Scratch2.BlockType.COMMAND,
+						text: "Look for LAN servers",
+					},
+                    {
+						opcode: "found_lan_servers",
+						blockType: Scratch2.BlockType.REPORTER,
+						text: "All LAN servers found",
+					},
                     "---",
                     {
 						blockType: Scratch2.BlockType.LABEL,
@@ -2049,6 +2128,51 @@ SOFTWARE.
 					},
                 },
             }
+        }
+
+        connected_to_lan() {
+            const self = this;
+            return Scratch2.Cast.toBoolean(self.client.is_lan_connected);
+        }
+
+        host_lan_server({USERNAME}) {
+            const self = this;
+            self.client.RunLANServer(Scratch2.Cast.toString(USERNAME));
+        }
+
+        hosting_lan_server() {
+            const self = this;
+            return Scratch2.Cast.toBoolean(self.client.hosting_lan);
+        }
+
+        stop_lan_server() {
+            const self = this;
+            self.client.StopLANServer();
+        }
+
+        join_lan_server({IP, USERNAME}) {
+            const self = this;
+            self.client.ConnectWithLAN(Scratch2.Cast.toString(IP), Scratch2.Cast.toString(USERNAME));
+        }
+
+        leave_lan_server() {
+            const self = this;
+            self.client.DisconnectFromLAN();
+        }
+
+        find_lan_servers() {
+            const self = this;
+            self.client.FindLANHosts();
+        }
+
+        looking_for_lan_servers() {
+            const self = this;
+            return Scratch2.Cast.toBoolean(self.client.is_lan_searching);
+        }
+
+        found_lan_servers() {
+            const self = this;
+            return Scratch2.Cast.toString(JSON.stringify(self.client.lan_hosts));
         }
 
         isKeepaliveOn() {
