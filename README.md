@@ -1,5 +1,9 @@
 ![CloudLink Phi Banner](https://github.com/user-attachments/assets/f28b880c-baa0-450a-ab60-ee0a034dc679)
 
+# PLEASE DO NOT USE THIS IN NEW PROJECTS - THIS HAS BEEN DISCONTINUED.
+I will not be providing support or updates to this repository anymore. This was originally intended to be a stop-gap for development but I don't see much of a purpose for this anymore.
+This is an extremely bloated and unstable implementation and I highly discourage its use. If you want to use a WebRTC-based connection, I suggest you switch to my PeerJS extension.
+
 # CloudLink Φ ("Phi")
 
 Imagine the simplicity of Classic CloudLink, but with the power of CloudLink Omega. Introducing CloudLink Phi, a "diet coke" client/server suite built using the CL5 protocol.
