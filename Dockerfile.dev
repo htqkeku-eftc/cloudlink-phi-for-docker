@@ -1,0 +1,6 @@
+FROM golang:1.23.1-alpine
+WORKDIR /app
+COPY ./server/ .
+EXPOSE 3000
+RUN go build -o main .
+CMD ["go", "run", "main.go"]
